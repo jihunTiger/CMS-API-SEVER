@@ -1,4 +1,4 @@
-import os
+from functools import lru_cache
 from fastapi import FastAPI, Body, HTTPException, status
 from fastapi.responses import Response, JSONResponse
 from fastapi.encoders import jsonable_encoder
@@ -6,9 +6,17 @@ from pydantic import BaseModel, Field, EmailStr
 from bson import ObjectId
 from typing import Optional, List
 import motor.motor_asyncio
+from config import Settings
 
 app = FastAPI()
-client = motor.motor_asyncio.AsyncIOMotorClient(os.environ["MONGODB_URL"])
+
+@lru_cache()
+def get_settings():
+    return Settings()
+
+
+
+client = motor.motor_asyncio.AsyncIOMotorClient(get_settings().MONGODB_URL)
 db = client.college
 
 
