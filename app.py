@@ -10,9 +10,27 @@ import motor.motor_asyncio
 import csv
 import codecs
 from config import Settings
+from fastapi.openapi.utils import get_openapi
 
 app = FastAPI()
 
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    openapi_schema = get_openapi(
+        title="샵이브이 고객관리 시스템 API",
+        version="0.1.0",
+        description="고객관리 시스템에 필요한 API 입니다. ",
+        routes=app.routes,
+    )
+    openapi_schema["info"]["x-logo"] = {
+        "url": "https://fastapi.tiangolo.com/img/logo-margin/logo-teal.png"
+    }
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+
+app.openapi = custom_openapi
 
 @lru_cache()
 def get_settings():
@@ -55,7 +73,7 @@ class customerModel(MongoBaseModel):
     cust_type: str = ""
     cust_email: str = ""
     cust_route: str = ""
-    cust_date: str = ""
+    created_date: str = ""
     cust_purpose: str = ""
     cust_area: str = ""
     cust_status: str = ""
@@ -73,10 +91,11 @@ class customerModel(MongoBaseModel):
         }
 
 
-class UpdatecustomerModel(BaseModel):
+class UpdateCustomerModel(BaseModel):
     cust_name: Optional[str]
     cust_email: Optional[EmailStr]
     cust_mobile: Optional[str]
+    modified_date : Optional[str]
 
 
 class touchModel(MongoBaseModel):
@@ -100,6 +119,13 @@ class touchModel(MongoBaseModel):
             }
         }
 
+class UpdateTouchModel(BaseModel):
+    touch_date: Union[str, None]
+    touch_time: Union[str, None]
+    touch_desc: Union[str, None]
+    touch_partner: Union[str, None]   #누가 발생시킨건지
+    touch_chann: Union[str, None]  # 열거형 
+    touch_type: Union[str, None]   # 열거형 사용으로 드롭다운 선택
 
 @app.post("/customer/", response_description="Add new customer", response_model=customerModel, tags=["고객"])
 async def create_customer(customer: customerModel = Body(...)):
@@ -112,7 +138,7 @@ async def create_customer(customer: customerModel = Body(...)):
     return JSONResponse(status_code=status.HTTP_201_CREATED, content=created_customer)
 
 
-@app.post("/customer/file", response_description="csv 파일 고객이 추가되었습니다.", tags=["고객"])
+@app.post("/customer/file", summary="csv 파일을 이용하여 고객목록을 추가할 수 있습니다.", tags=["고객"])
 async def create_customers(file: UploadFile = File(...)):
     # csvfile = open(file.fileName, 'r')
 # import re
@@ -186,21 +212,22 @@ async def show_customer(id: str):
 
 
 @app.put(
-    "/customer/{id}", response_description="Update a customer", response_model=customerModel, tags=["고객"]
+    "/customer/{id}", summary="고객정보 업데이트", response_model=customerModel, tags=["고객"]
 )
-async def update_customer(id: str, customer: UpdatecustomerModel=Body(...)):
+async def update_customer(id: str, customer: UpdateCustomerModel=Body(...)):
     customer={k: v for k, v in customer.dict().items() if v is not None}
 
     if len(customer) >= 1:
-        update_result=await db["customers"].update_one({"_id": id}, {"$set": customer})
+        customer['modifiled_date'] = datetime.datetime.now()
+        update_result=await db["customers"].update_one({"_id": PyObjectId(id)}, {"$set": customer})
 
         if update_result.modified_count == 1:
             if (
-                updated_customer := await db["customers"].find_one({"_id": id})
+                updated_customer := await db["customers"].find_one({"_id": PyObjectId(id)})
             ) is not None:
                 return updated_customer
 
-    if (existing_customer := await db["customers"].find_one({"_id": id})) is not None:
+    if (existing_customer := await db["customers"].find_one({"_id": PyObjectId(id)})) is not None:
         return existing_customer
 
     raise HTTPException(status_code=404, detail=f"customer {id} not found")
@@ -219,27 +246,52 @@ async def delete_customer(id: str):
 
 
 @app.get(
-    "/touch/{id}",
+    "/touch/{cust_id}",
      summary="터치히스토리 보기", response_model=List[touchModel], tags=["고객 터치"]
 )
-async def show_touchs(id: str, page: int = 1, per_page: int = 10):
+async def show_touchs(cust_id: str, page: int = 1, per_page: int = 10):
     """
     id 필드에 고객아이디를 입력 :
     """
-    cursor = db.touchs.find({"cust_id": PyObjectId(id)}).skip((page-1)*per_page).limit(per_page)
+    cursor = db.touchs.find({"cust_id": PyObjectId(cust_id)}).skip((page-1)*per_page).limit(per_page)
     touchs = await cursor.to_list(length=per_page)
     if len(touchs) >= 1:
         return touchs
     else:
-        raise HTTPException(status_code=404, detail=f"{id} 고객의 history를 찾을수 없습니다.")
+        raise HTTPException(status_code=404, detail=f"{cust_id} 고객의 history를 찾을수 없습니다.")
 
-@app.post("/touch/{id}", description="", response_model=touchModel, tags=["고객 터치"])
-async def add_touch(id: str, touch: touchModel = Body(...)):
-    # 딕셔너리 자료형으로 변경
+@app.post("/touch/{cust_id}", summary="터치내용 저장", response_model=touchModel, tags=["고객 터치"])
+async def add_touch(cust_id: str, touch: touchModel = Body(...)):
+    """
+    id 필드 : 고객의 유니크 id (고객 조회를 통해 획득)
+    """
     touch = jsonable_encoder(touch)
     touch = {k: v for k, v in touch.items() if v != ''}
 
-    touch["cust_id"] = PyObjectId(id)
+    touch["cust_id"] = PyObjectId(cust_id)
     new_touch = await db.touchs.insert_one(touch)
     created_touch = await db["customers"].find_one({"_id": new_touch.inserted_id})
     return JSONResponse(status_code=status.HTTP_201_CREATED, content=created_touch)
+
+@app.put(
+    "/touch/{id}", summary="터치정보 업데이트", response_model=touchModel, tags=["고객 터치"]
+)
+async def update_touch(id: str, touch: UpdateTouchModel=Body(...)):
+    """
+    id 필드는 개별 터치정보의 uid  : 터치정보 수정 
+    """
+    touch={k: v for k, v in touch.dict().items() if v is not None}
+
+    if len(touch) >= 1:
+        update_result=await db.touchs.update_one({"_id": PyObjectId(id)}, {"$set": touch})
+
+        if update_result.modified_count == 1:
+            if (
+                updated_touch := await db.touchs.find_one({"_id": PyObjectId(id)})
+            ) is not None:
+                return updated_touch
+
+    if (existing_customer := await db.touchs.find_one({"_id": PyObjectId(id)})) is not None:
+        return existing_customer
+
+    raise HTTPException(status_code=404, detail=f" {id} 터치정보가 없습니다. ")
